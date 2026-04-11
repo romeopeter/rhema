@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button"
 import { ApiKeyPrompt } from "@/components/ui/api-key-prompt"
 import { MicIcon, MicOffIcon } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
-import { hasConfiguredApiKey } from "@/lib/api-key"
 import {
   useTranscriptStore,
   useAudioStore,
@@ -139,11 +138,6 @@ export function TranscriptPanel() {
   }, [segments, currentPartial])
 
   const handleStart = async () => {
-    if (!hasConfiguredApiKey(deepgramApiKey)) {
-      setShowKeyPrompt(true)
-      return
-    }
-
     try {
       useTranscriptStore.getState().setConnectionStatus("connecting")
       const { useSettingsStore } = await import("@/stores")
@@ -156,9 +150,15 @@ export function TranscriptPanel() {
       })
       useTranscriptStore.getState().setTranscribing(true)
     } catch (e) {
-      console.error("Failed to start transcription:", e)
+      const errorMsg = String(e)
+      console.error("Failed to start transcription:", errorMsg)
       useTranscriptStore.getState().setConnectionStatus("error")
-      alert(String(e))
+
+      if (errorMsg.includes("No Deepgram API key")) {
+        setShowKeyPrompt(true)
+      } else {
+        alert(errorMsg)
+      }
     }
   }
 
