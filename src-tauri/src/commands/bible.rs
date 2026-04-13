@@ -1,3 +1,5 @@
+#![expect(clippy::needless_pass_by_value, reason = "Tauri command extractors require pass-by-value")]
+
 use std::sync::Mutex;
 use serde::Serialize;
 use tauri::State;
@@ -115,11 +117,11 @@ pub fn set_active_translation(
     if let Some(ref db) = app_state.bible_db {
         let translations = db.list_translations().map_err(|e| e.to_string())?;
         if !translations.iter().any(|t| t.id == translation_id) {
-            return Err(format!("Translation ID {} not found", translation_id));
+            return Err(format!("Translation ID {translation_id} not found"));
         }
     }
     app_state.active_translation_id = translation_id;
-    log::info!("[BIBLE] Active translation set to ID {}", translation_id);
+    log::info!("[BIBLE] Active translation set to ID {translation_id}");
     Ok(translation_id)
 }
 
@@ -146,15 +148,13 @@ pub fn get_translation_verses_for_search(
     db.load_translation_verses_for_search(translation_id)
         .map(|rows| {
             rows.into_iter()
-                .map(
-                    |(book_number, book_name, chapter, verse, text)| VerseSearchRow {
-                        book_number,
-                        book_name,
-                        chapter,
-                        verse,
-                        text,
-                    },
-                )
+                .map(|v| VerseSearchRow {
+                    book_number: v.book_number,
+                    book_name: v.book_name,
+                    chapter: v.chapter,
+                    verse: v.verse,
+                    text: v.text,
+                })
                 .collect()
         })
         .map_err(|e| e.to_string())

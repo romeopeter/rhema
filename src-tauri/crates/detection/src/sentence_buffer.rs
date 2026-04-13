@@ -14,6 +14,7 @@ const DEFAULT_FLUSH_TIMEOUT_MS: u128 = 3000;
 /// 2. Flushes when sentence-ending punctuation (`.!?`) is detected.
 /// 3. Flushes on timeout if no punctuation arrives (fallback).
 /// 4. Flushes on `speech_final` signal (Deepgram utterance boundary).
+#[derive(Debug)]
 pub struct SentenceBuffer {
     buffer: String,
     last_append: Option<Instant>,
@@ -66,7 +67,7 @@ impl SentenceBuffer {
         None
     }
 
-    /// Force-flush the buffer (e.g., on speech_final signal).
+    /// Force-flush the buffer (e.g., on `speech_final` signal).
     /// Returns the buffered text, or None if empty.
     pub fn force_flush(&mut self) -> Option<String> {
         if self.buffer.is_empty() {

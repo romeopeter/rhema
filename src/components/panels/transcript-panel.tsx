@@ -1,7 +1,8 @@
-import { useRef, useEffect } from "react"
+import { useEffect, useRef, useState } from "react"
 import { PanelHeader } from "@/components/ui/panel-header"
 import { LevelMeter } from "@/components/ui/level-meter"
 import { Button } from "@/components/ui/button"
+import { ApiKeyPrompt } from "@/components/ui/api-key-prompt"
 import { MicIcon, MicOffIcon } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import {
@@ -25,6 +26,7 @@ export function TranscriptPanel() {
   const audioLevel = useAudioStore((s) => s.level)
   const deepgramApiKey = useSettingsStore((s) => s.deepgramApiKey)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const [showKeyPrompt, setShowKeyPrompt] = useState(false)
 
   // Listen for Tauri events
   useTauriEvent<{ rms: number; peak: number }>("audio_level", (payload) => {
@@ -78,9 +80,9 @@ export function TranscriptPanel() {
     useDetectionStore.getState().addDetections(detections)
 
     // Auto-navigate book search + select verse for preview/live
-    // Handle direct, contextual (reading mode), and high-confidence quotation matches
+    // Auto-navigate on direct detection hits
     const directHit = detections.find(
-      (d) => d.source === "direct" || d.source === "contextual" || (d.source === "quotation" && d.auto_queued)
+      (d) => d.source === "direct" && !d.is_chapter_only
     )
     if (directHit && directHit.book_number > 0) {
       // Select verse immediately so preview/live panels update
@@ -106,8 +108,42 @@ export function TranscriptPanel() {
 
     // Auto-queue high-confidence detections
     for (const d of detections) {
+      // Check if this detection refines an existing chapter-only queue item
+      if (
+        !d.is_chapter_only &&
+        d.source === "direct" &&
+        useQueueStore
+          .getState()
+          .updateEarlyRef(
+            d.book_number,
+            d.chapter,
+            d.verse,
+            d.verse_ref,
+            d.verse_text,
+          )
+      ) {
+        continue
+      }
+
       if (d.auto_queued) {
-        useQueueStore.getState().addItem({
+        const queue = useQueueStore.getState()
+        // For chapter-only detections, match by book+chapter (any verse) to
+        // avoid re-adding "Mark 1:1" when "Mark 1:2" already exists from a
+        // previous chapter-only → refinement cycle.
+        const dupIdx = d.is_chapter_only
+          ? queue.items.findIndex(
+              (i) =>
+                i.verse.book_number === d.book_number &&
+                i.verse.chapter === d.chapter,
+            )
+          : queue.findDuplicate(d.book_number, d.chapter, d.verse)
+        if (dupIdx !== -1) {
+          const existing = queue.items[dupIdx]
+          queue.flashItem(existing.id)
+          if (!d.is_chapter_only) queue.setActive(dupIdx)
+          continue
+        }
+        queue.addItem({
           id: crypto.randomUUID(),
           verse: {
             id: 0,
@@ -123,6 +159,7 @@ export function TranscriptPanel() {
           confidence: d.confidence,
           source: d.source === "direct" ? "ai-direct" : "ai-semantic",
           added_at: Date.now(),
+          is_chapter_only: d.is_chapter_only,
         })
       }
     }
@@ -140,17 +177,26 @@ export function TranscriptPanel() {
       useTranscriptStore.getState().setConnectionStatus("connecting")
       const { useSettingsStore } = await import("@/stores")
       const settings = useSettingsStore.getState()
-      console.log("[AUDIO] Starting with deviceId:", settings.audioDeviceId, "gain:", settings.gain)
-      await invoke("start_transcription", {
-        apiKey: deepgramApiKey ?? "",
+      const params = {
+        apiKey: settings.sttProvider === "deepgram" ? (deepgramApiKey ?? "") : "",
         deviceId: settings.audioDeviceId,
         gain: settings.gain,
-      })
+        provider: settings.sttProvider,
+      }
+      console.log("[AUDIO] Starting transcription:", params)
+      await invoke("start_transcription", params)
+      console.log("[AUDIO] Transcription started successfully")
       useTranscriptStore.getState().setTranscribing(true)
     } catch (e) {
-      console.error("Failed to start transcription:", e)
+      const errorMsg = String(e)
+      console.error("[AUDIO] Failed to start transcription:", errorMsg)
       useTranscriptStore.getState().setConnectionStatus("error")
-      alert(String(e))
+
+      if (errorMsg.includes("No Deepgram API key")) {
+        setShowKeyPrompt(true)
+      } else {
+        alert(errorMsg)
+      }
     }
   }
 
@@ -254,6 +300,13 @@ export function TranscriptPanel() {
           </Button>
         )}
       </div>
+
+      <ApiKeyPrompt
+        open={showKeyPrompt}
+        onOpenChange={setShowKeyPrompt}
+        service="Deepgram"
+        description="Live transcription needs a Deepgram API key. Add it in settings so the app can start listening."
+      />
     </div>
   )
 }

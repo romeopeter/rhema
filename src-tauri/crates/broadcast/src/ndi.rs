@@ -36,7 +36,7 @@ struct NdiVideoFrameV2 {
     timestamp: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NdiStartRequest {
     pub source_name: String,
@@ -45,7 +45,7 @@ pub struct NdiStartRequest {
     pub alpha_mode: NdiAlphaMode,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NdiResolution {
     R720p,
@@ -54,7 +54,7 @@ pub enum NdiResolution {
 }
 
 impl NdiResolution {
-    pub fn dimensions(self) -> (u32, u32) {
+    pub fn dimensions(&self) -> (u32, u32) {
         match self {
             Self::R720p => (1280, 720),
             Self::R1080p => (1920, 1080),
@@ -63,7 +63,7 @@ impl NdiResolution {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NdiFrameRate {
     Fps24,
@@ -72,7 +72,7 @@ pub enum NdiFrameRate {
 }
 
 impl NdiFrameRate {
-    pub fn fps(self) -> u32 {
+    pub fn fps(&self) -> u32 {
         match self {
             Self::Fps24 => 24,
             Self::Fps30 => 30,
@@ -81,7 +81,7 @@ impl NdiFrameRate {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NdiAlphaMode {
     NoneOpaque,
@@ -101,43 +101,45 @@ pub struct NdiSessionInfo {
     pub fps: u32,
 }
 
-#[derive(Debug, Error)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Error)]
 pub enum NdiError {
     #[error("NDI source name must not be empty")]
     EmptySourceName,
-    #[error("Unable to locate NDI library at {0}")]
+    #[error("unable to locate NDI library at {0}")]
     LibraryNotFound(String),
-    #[error("Failed to load NDI library: {0}")]
+    #[error("failed to load NDI library: {0}")]
     LibraryLoad(String),
-    #[error("Failed to load symbol {symbol}: {message}")]
+    #[error("failed to load symbol {symbol}: {message}")]
     SymbolLoad {
         symbol: &'static str,
         message: String,
     },
     #[error("NDI initialization failed")]
     InitializeFailed,
-    #[error("Failed to create NDI sender instance")]
+    #[error("failed to create NDI sender instance")]
     SenderCreateFailed,
     #[error("NDI session is not active")]
     SessionNotActive,
-    #[error("Frame dimensions do not match active NDI settings ({expected_width}x{expected_height})")]
+    #[error("frame dimensions do not match active NDI settings ({expected_width}x{expected_height})")]
     FrameDimensionsMismatch {
         expected_width: u32,
         expected_height: u32,
     },
-    #[error("Frame buffer size is invalid for dimensions {width}x{height}")]
+    #[error("frame buffer size is invalid for dimensions {width}x{height}")]
     InvalidFrameBufferSize { width: u32, height: u32 },
 }
 
+#[derive(Default)]
 pub struct NdiRuntime {
     sessions: std::collections::HashMap<String, ActiveNdiSession>,
 }
 
-impl Default for NdiRuntime {
-    fn default() -> Self {
-        Self {
-            sessions: std::collections::HashMap::new(),
-        }
+impl std::fmt::Debug for NdiRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NdiRuntime")
+            .field("active_sessions", &self.sessions.len())
+            .finish()
     }
 }
 
@@ -159,16 +161,16 @@ impl NdiRuntime {
     ) -> Result<NdiSessionInfo, NdiError> {
         // Stop existing session with this ID if running
         if let Some(existing) = self.sessions.remove(&session_id) {
-            log::info!("NDI[{}]: shutting down existing session before restart", session_id);
-            existing.shutdown();
+            log::info!("NDI[{session_id}]: shutting down existing session before restart");
+            drop(existing);
         }
 
-        log::info!("NDI[{}]: starting session '{}'", session_id, request.source_name);
+        log::info!("NDI[{session_id}]: starting session '{}'", request.source_name);
         let session = ActiveNdiSession::create(request)?;
         let info = session.info.clone();
         log::info!(
-            "NDI[{}]: session active — {}x{} @ {}fps",
-            session_id, info.width, info.height, info.fps
+            "NDI[{session_id}]: session active — {}x{} @ {}fps",
+            info.width, info.height, info.fps
         );
         self.sessions.insert(session_id, session);
         Ok(info)
@@ -176,15 +178,14 @@ impl NdiRuntime {
 
     pub fn stop(&mut self, session_id: &str) {
         if let Some(existing) = self.sessions.remove(session_id) {
-            log::info!("NDI[{}]: stopping session", session_id);
-            existing.shutdown();
+            log::info!("NDI[{session_id}]: stopping session");
+            drop(existing);
         }
     }
 
     pub fn stop_all(&mut self) {
-        for (id, session) in self.sessions.drain() {
-            log::info!("NDI[{}]: stopping session", id);
-            session.shutdown();
+        for (id, _session) in self.sessions.drain() {
+            log::info!("NDI[{id}]: stopping session");
         }
     }
 
@@ -197,7 +198,7 @@ impl NdiRuntime {
         session_id: &str,
         width: u32,
         height: u32,
-        rgba_data: Vec<u8>,
+        rgba_data: &[u8],
     ) -> Result<(), NdiError> {
         let session = self
             .sessions
@@ -229,6 +230,7 @@ unsafe impl Send for NdiRuntime {}
 unsafe impl Sync for NdiRuntime {}
 
 impl ActiveNdiSession {
+    #[expect(clippy::needless_pass_by_value, reason = "request fields are destructured and moved into the session")]
     fn create(request: NdiStartRequest) -> Result<Self, NdiError> {
         let source_name = request.source_name.trim().to_string();
         if source_name.is_empty() {
@@ -236,6 +238,7 @@ impl ActiveNdiSession {
         }
 
         let library_path = resolve_library_path()?;
+        // SAFETY: library_path was validated to exist by resolve_library_path()
         let library = unsafe { Library::new(&library_path) }
             .map_err(|e| NdiError::LibraryLoad(e.to_string()))?;
 
@@ -246,6 +249,7 @@ impl ActiveNdiSession {
         let send_video_fn =
             *load_symbol::<NdiSendVideoV2Fn>(&library, b"NDIlib_send_send_video_v2\0", "NDIlib_send_send_video_v2")?;
 
+        // SAFETY: initialize_fn is a valid function pointer loaded from the NDI library
         if !unsafe { initialize_fn() } {
             return Err(NdiError::InitializeFailed);
         }
@@ -258,8 +262,13 @@ impl ActiveNdiSession {
             clock_audio: false,
         };
 
-        let sender = unsafe { send_create_fn(&create as *const NdiSendCreate) };
+        // SAFETY: send_create_fn is a valid function pointer. The NdiSendCreate struct has valid
+        // pointers (name is a CString kept alive by _sender_name field). p_groups is null which
+        // NDI accepts.
+        let create_ptr = std::ptr::from_ref(&create);
+        let sender = unsafe { send_create_fn(create_ptr) };
         if sender.is_null() {
+            // SAFETY: NDI was initialized successfully above, so ndi_destroy is safe to call
             unsafe { ndi_destroy_fn() };
             return Err(NdiError::SenderCreateFailed);
         }
@@ -292,7 +301,7 @@ impl ActiveNdiSession {
         &mut self,
         width: u32,
         height: u32,
-        rgba_data: Vec<u8>,
+        rgba_data: &[u8],
     ) -> Result<(), NdiError> {
         if width != self.info.width || height != self.info.height {
             return Err(NdiError::FrameDimensionsMismatch {
@@ -322,6 +331,14 @@ impl ActiveNdiSession {
             };
         }
 
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "NDI FFI requires i32 for dimensions/rates that are always positive and small"
+        )]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "NDI FFI requires f32 aspect ratio; u32 dimensions fit in f32 without loss"
+        )]
         let frame = NdiVideoFrameV2 {
             xres: width as i32,
             yres: height as i32,
@@ -337,21 +354,31 @@ impl ActiveNdiSession {
             timestamp: 0,
         };
 
+        // SAFETY: sender is a valid NDI send instance. frame points to self.frame_buffer which
+        // is correctly sized and will outlive this call.
+        let sender = self.sender;
+        let frame_ptr = std::ptr::from_ref(&frame);
         unsafe {
-            (self.send_video)(self.sender, &frame);
+            (self.send_video)(sender, frame_ptr);
         }
         self.frame_count += 1;
         if self.frame_count == 1 {
-            log::info!("NDI: first frame sent ({}x{}, {} bytes)", width, height, self.frame_buffer.len());
-        } else if self.frame_count % 300 == 0 {
+            log::info!("NDI: first frame sent ({width}x{height}, {} bytes)", self.frame_buffer.len());
+        } else if self.frame_count.is_multiple_of(300) {
             log::info!("NDI: {} frames sent", self.frame_count);
         }
         Ok(())
     }
+}
 
-    fn shutdown(self) {
+impl Drop for ActiveNdiSession {
+    fn drop(&mut self) {
+        // SAFETY: sender was created by NDIlib_send_create and is non-null (validated in create()).
+        // send_destroy and ndi_destroy are valid function pointers loaded from the NDI library.
+        // The library (_library field) is kept alive by this struct and will be dropped after this.
+        let sender = self.sender;
         unsafe {
-            (self.send_destroy)(self.sender);
+            (self.send_destroy)(sender);
             (self.ndi_destroy)();
         }
     }
@@ -389,6 +416,7 @@ fn load_symbol<'a, T>(
     symbol: &'static [u8],
     name: &'static str,
 ) -> Result<Symbol<'a, T>, NdiError> {
+    // SAFETY: symbol name is a null-terminated byte string matching the NDI SDK's exported symbols
     unsafe { library.get::<T>(symbol) }.map_err(|e| NdiError::SymbolLoad {
         symbol: name,
         message: e.to_string(),

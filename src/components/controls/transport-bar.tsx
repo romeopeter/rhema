@@ -1,16 +1,17 @@
 import { useState } from "react"
 import { LevelMeter } from "@/components/ui/level-meter"
 import { LiveIndicator } from "@/components/ui/live-indicator"
-import { SessionTimer } from "@/components/ui/session-timer"
 import { Badge } from "@/components/ui/badge"
-import { MicIcon, PaletteIcon, CastIcon } from "lucide-react"
+import { MicIcon, PaletteIcon, CastIcon, SunIcon, MoonIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SettingsDialog } from "@/components/settings-dialog"
 import { ThemeDesigner } from "@/components/broadcast/theme-designer"
 import { BroadcastSettings } from "@/components/broadcast/broadcast-settings"
 import { useAudioStore, useTranscriptStore, useBroadcastStore } from "@/stores"
+import { useTheme } from "@/components/theme-provider"
 
 export function TransportBar() {
+  const { theme, setTheme } = useTheme()
   const audioLevel = useAudioStore((s) => s.level)
   const isTranscribing = useTranscriptStore((s) => s.isTranscribing)
   const [broadcastOpen, setBroadcastOpen] = useState(false)
@@ -30,9 +31,6 @@ export function TransportBar() {
         </Badge>
       </div>
 
-      {/* Center: Session Timer */}
-      <SessionTimer seconds={0} />
-
       {/* Right: Audio + Status + Settings */}
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-2">
@@ -43,7 +41,20 @@ export function TransportBar() {
         <Button
           variant="ghost"
           size="icon-sm"
+          title="Toggle theme"
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+        >
+          {theme === "dark" ? (
+            <SunIcon className="size-3.5" />
+          ) : (
+            <MoonIcon className="size-3.5" />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
           title="Broadcast Settings"
+          data-tour="broadcast"
           onClick={() => setBroadcastOpen(true)}
         >
           <CastIcon className="size-3.5" />
@@ -53,6 +64,7 @@ export function TransportBar() {
           variant="ghost"
           size="icon-sm"
           title="Theme Designer"
+          data-tour="theme"
           onClick={() => useBroadcastStore.getState().setDesignerOpen(true)}
         >
           <PaletteIcon className="size-3.5" />

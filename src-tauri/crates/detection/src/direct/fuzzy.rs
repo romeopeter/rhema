@@ -29,7 +29,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
     for (i, a_ch) in a.chars().enumerate() {
         curr_row[0] = i + 1;
         for (j, b_ch) in b.chars().enumerate() {
-            let cost = if a_ch == b_ch { 0 } else { 1 };
+            let cost = usize::from(a_ch != b_ch);
             curr_row[j + 1] = (prev_row[j] + cost)
                 .min(prev_row[j + 1] + 1)
                 .min(curr_row[j] + 1);
@@ -41,12 +41,15 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// Determine the maximum allowed edit distance for a book name.
-/// Names longer than 8 characters allow distance 3; otherwise distance 2.
+/// Short names (≤4 chars like "Mark", "Ruth", "Joel") only allow 1 edit
+/// to prevent false positives like "Mara" → "Mark".
 fn max_distance_for(name: &str) -> usize {
-    if name.len() > 8 {
-        3
-    } else {
+    if name.len() <= 4 {
+        1  // "Mark", "Ruth", "Joel" — only 1 edit allowed
+    } else if name.len() <= 8 {
         2
+    } else {
+        3  // "Philippians", "Deuteronomy" — allow 3 for very long names
     }
 }
 

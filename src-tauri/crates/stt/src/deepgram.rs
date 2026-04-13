@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::error::SttError;
 use crate::keyterms::bible_keyterms;
+use crate::provider::SttProvider;
 use crate::types::{SttConfig, TranscriptEvent, Word};
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
@@ -22,6 +23,14 @@ const BATCH_SAMPLES: usize = 4000;
 pub struct DeepgramClient {
     config: SttConfig,
     cancelled: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for DeepgramClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeepgramClient")
+            .field("model", &self.config.model)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DeepgramClient {
@@ -121,10 +130,7 @@ impl DeepgramClient {
                 Err(e) => {
                     attempts += 1;
                     log::warn!(
-                        "DeepgramClient: connection error (attempt {}/{}): {}",
-                        attempts,
-                        MAX_RECONNECT_ATTEMPTS,
-                        e
+                        "DeepgramClient: connection error (attempt {attempts}/{MAX_RECONNECT_ATTEMPTS}): {e}",
                     );
 
                     let _ = event_tx.send(TranscriptEvent::Disconnected).await;
@@ -133,8 +139,7 @@ impl DeepgramClient {
                         log::error!("DeepgramClient: max reconnection attempts reached");
                         let _ = event_tx
                             .send(TranscriptEvent::Error(format!(
-                                "Max reconnection attempts reached: {}",
-                                e
+                                "Max reconnection attempts reached: {e}"
                             )))
                             .await;
                         return Err(e);
@@ -149,6 +154,7 @@ impl DeepgramClient {
     }
 
     /// Attempt a single WebSocket connection and run send/receive loops.
+    #[allow(clippy::too_many_lines)]
     async fn try_connect(
         &self,
         audio_rx: Receiver<Vec<i16>>,
@@ -195,6 +201,7 @@ impl DeepgramClient {
         // tasks when run inside tokio::spawn, causing events to stop flowing.
 
         // Bridge channel: blocking audio reader → async WebSocket writer
+        #[allow(clippy::items_after_statements)]
         enum WsCommand {
             Audio(Vec<u8>),
             KeepAlive,
@@ -268,7 +275,7 @@ impl DeepgramClient {
                 match cmd {
                     WsCommand::Audio(data) => {
                         if let Err(e) = write.send(Message::Binary(data.into())).await {
-                            log::error!("DeepgramClient ws_writer: send error: {}", e);
+                            log::error!("DeepgramClient ws_writer: send error: {e}");
                             send_err.store(true, Ordering::SeqCst);
                             break;
                         }
@@ -276,7 +283,7 @@ impl DeepgramClient {
                     WsCommand::KeepAlive => {
                         let ka = serde_json::json!({"type": "KeepAlive"}).to_string();
                         if let Err(e) = write.send(Message::Text(ka.into())).await {
-                            log::error!("DeepgramClient ws_writer: keepalive error: {}", e);
+                            log::error!("DeepgramClient ws_writer: keepalive error: {e}");
                             send_err.store(true, Ordering::SeqCst);
                             break;
                         }
@@ -301,7 +308,7 @@ impl DeepgramClient {
                 match msg_result {
                     Ok(Message::Text(text)) => {
                         if let Err(e) = parse_and_send(&text, &event_tx).await {
-                            log::warn!("DeepgramClient receiver: parse error: {}", e);
+                            log::warn!("DeepgramClient receiver: parse error: {e}");
                         }
                     }
                     Ok(Message::Close(_)) => {
@@ -312,10 +319,10 @@ impl DeepgramClient {
                         // Ignore binary/ping/pong frames
                     }
                     Err(e) => {
-                        log::error!("DeepgramClient receiver: WebSocket error: {}", e);
+                        log::error!("DeepgramClient receiver: WebSocket error: {e}");
                         recv_err.store(true, Ordering::SeqCst);
                         let _ = event_tx
-                            .send(TranscriptEvent::Error(format!("WebSocket error: {}", e)))
+                            .send(TranscriptEvent::Error(format!("WebSocket error: {e}")))
                             .await;
                         break;
                     }
@@ -342,7 +349,7 @@ impl DeepgramClient {
     }
 }
 
-/// Parse a Deepgram JSON response and send the corresponding TranscriptEvent.
+/// Parse a Deepgram JSON response and send the corresponding `TranscriptEvent`.
 async fn parse_and_send(
     text: &str,
     event_tx: &mpsc::Sender<TranscriptEvent>,
@@ -374,12 +381,12 @@ async fn parse_and_send(
 
     let is_final = json
         .get("is_final")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
     let speech_final = json
         .get("speech_final")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
     let channel = json.get("channel");
@@ -397,7 +404,7 @@ async fn parse_and_send(
 
     let confidence = first_alt
         .and_then(|a| a.get("confidence"))
-        .and_then(|c| c.as_f64())
+        .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0);
 
     let words = first_alt
@@ -414,7 +421,7 @@ async fn parse_and_send(
                         punctuated_word: w
                             .get("punctuated_word")
                             .and_then(|p| p.as_str())
-                            .map(|s| s.to_string()),
+                            .map(ToString::to_string),
                     })
                 })
                 .collect::<Vec<Word>>()
@@ -438,4 +445,89 @@ async fn parse_and_send(
         .map_err(|e| SttError::SendError(e.to_string()))?;
 
     Ok(())
+}
+
+// ── SttProvider implementation ───────────────────────────────────────────────
+
+#[async_trait::async_trait]
+impl SttProvider for DeepgramClient {
+    async fn start(
+        &self,
+        audio_rx: Receiver<Vec<i16>>,
+        event_tx: mpsc::Sender<TranscriptEvent>,
+    ) -> Result<(), SttError> {
+        let result = self.connect(audio_rx.clone(), event_tx.clone()).await;
+
+        // On max reconnect failure, fall back to REST mode (hybrid).
+        if let Err(ref e) = result {
+            log::warn!(
+                "[STT-Deepgram] WebSocket failed after retries: {e}, switching to REST fallback"
+            );
+            let _ = event_tx
+                .send(TranscriptEvent::Error(
+                    "Connection unstable, switching to Hybrid mode".into(),
+                ))
+                .await;
+
+            let rest_client = crate::rest::DeepgramRestClient::new(self.config.clone());
+            let mut audio_buffer: Vec<i16> = Vec::new();
+            let flush_interval = std::time::Duration::from_secs(5);
+            let mut last_flush = std::time::Instant::now();
+            let cancelled = self.cancelled.clone();
+
+            loop {
+                if cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                match audio_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(samples) => {
+                        audio_buffer.extend(samples);
+
+                        if last_flush.elapsed() >= flush_interval && !audio_buffer.is_empty() {
+                            match rest_client.transcribe(&audio_buffer).await {
+                                Ok(events) => {
+                                    for evt in events {
+                                        let _ = event_tx.send(evt).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("[STT-REST] Transcription failed: {e}");
+                                }
+                            }
+                            audio_buffer.clear();
+                            last_flush = std::time::Instant::now();
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if last_flush.elapsed() >= flush_interval && !audio_buffer.is_empty() {
+                            match rest_client.transcribe(&audio_buffer).await {
+                                Ok(events) => {
+                                    for evt in events {
+                                        let _ = event_tx.send(evt).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("[STT-REST] Transcription failed: {e}");
+                                }
+                            }
+                            audio_buffer.clear();
+                            last_flush = std::time::Instant::now();
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn stop(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    fn name(&self) -> &'static str {
+        "deepgram"
+    }
 }

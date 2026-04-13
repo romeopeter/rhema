@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A reference to a specific Bible verse or verse range.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VerseRef {
     pub book_number: i32,
     pub book_name: String,
@@ -11,17 +11,14 @@ pub struct VerseRef {
 }
 
 /// Indicates how a detection was made.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum DetectionSource {
     DirectReference,
-    Contextual,
-    QuotationMatch { similarity: f64 },
-    SemanticLocal { similarity: f64 },
-    SemanticCloud { similarity: f64 },
+    Semantic { similarity: f64 },
 }
 
 /// A single detected Bible reference in transcript text.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Detection {
     pub verse_ref: VerseRef,
     /// Database primary key from semantic search (verses.id).
@@ -31,4 +28,8 @@ pub struct Detection {
     pub source: DetectionSource,
     pub transcript_snippet: String,
     pub detected_at: u64,
+    /// True when the detection was emitted from a chapter-only reference (no verse spoken yet).
+    /// The verse defaults to 1 and may be refined later when the speaker says the verse number.
+    #[serde(default)]
+    pub is_chapter_only: bool,
 }

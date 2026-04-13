@@ -4,6 +4,7 @@ mod state;
 
 use std::sync::Mutex;
 
+#[expect(clippy::too_many_lines, reason = "app setup is inherently complex")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load .env file — try src-tauri/.env first, then project root ../.env
@@ -22,6 +23,8 @@ pub fn run() {
         .manage(Mutex::new(rhema_detection::DirectDetector::new()))
         .manage(Mutex::new(rhema_detection::DetectionMerger::new()))
         .manage(Mutex::new(rhema_detection::ReadingMode::new()))
+        .manage(Mutex::new(commands::remote::OscRuntime::new()))
+        .manage(Mutex::new(commands::remote::HttpRuntime::new()))
         .invoke_handler(tauri::generate_handler![
             commands::bible::list_translations,
             commands::bible::list_books,
@@ -36,7 +39,6 @@ pub fn run() {
             commands::detection::detection_status,
             commands::detection::semantic_search,
             commands::detection::toggle_paraphrase_detection,
-            commands::detection::quotation_search,
             commands::detection::reading_mode_status,
             commands::detection::stop_reading_mode,
             commands::audio::get_audio_devices,
@@ -50,6 +52,13 @@ pub fn run() {
             commands::broadcast::stop_ndi,
             commands::broadcast::get_ndi_status,
             commands::broadcast::push_ndi_frame,
+            commands::remote::start_osc,
+            commands::remote::stop_osc,
+            commands::remote::get_osc_status,
+            commands::remote::start_http,
+            commands::remote::stop_http,
+            commands::remote::get_http_status,
+            commands::remote::update_remote_status,
         ])
         .setup(|app| {
             use tauri::Manager;
@@ -70,27 +79,13 @@ pub fn run() {
                 let bible_db = rhema_bible::BibleDb::open(&db_path)
                     .expect("Failed to open Bible database");
 
-                // Build quotation matching index from all English verses
-                log::info!("Building quotation matching index...");
-                let quotation_matcher = match bible_db.load_all_verses_for_quotation(Some("en")) {
-                    Ok(verses) => {
-                        log::info!("Loaded {} English verses for quotation index", verses.len());
-                        rhema_detection::QuotationMatcher::build(verses)
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to load verses for quotation index: {e}");
-                        rhema_detection::QuotationMatcher::new()
-                    }
-                };
-
                 let managed_state = app.state::<Mutex<state::AppState>>();
                 let mut state = managed_state.lock().unwrap();
                 state.bible_db = Some(bible_db);
-                state.quotation_matcher = quotation_matcher;
                 drop(state);
-                log::info!("Bible database loaded from {:?}", db_path);
+                log::info!("Bible database loaded from {}", db_path.display());
             } else {
-                log::warn!("Bible database not found at {:?}", db_path);
+                log::warn!("Bible database not found at {}", db_path.display());
             }
 
             // Try to load ONNX embedding model and pre-computed verse index
@@ -128,11 +123,12 @@ pub fn run() {
                             match rhema_detection::HnswVectorIndex::load(&embeddings_path, &ids_path, dim) {
                                 Ok(index) => {
                                     log::info!("Verse embeddings loaded ({} vectors)", index.len());
-                                    state.detection_pipeline.semantic =
+                                    state.detection_pipeline.set_semantic(
                                         rhema_detection::SemanticDetector::new(
                                             Box::new(embedder),
                                             Box::new(index),
-                                        );
+                                        ),
+                                    );
                                 }
                                 Err(e) => {
                                     log::warn!("Failed to load verse embeddings: {e}");
